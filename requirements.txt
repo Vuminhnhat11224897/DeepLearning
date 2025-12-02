@@ -1,0 +1,28 @@
+# Deep Learning Framework với GPU (CUDA 11.8)
+# Cài đặt PyTorch với CUDA: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# Xử lý dữ liệu
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+tqdm>=4.65.0
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Hyperparameter Optimization
+optuna>=3.0.0
+
+# Logging
+loguru>=0.7.0
+
+# Metrics (đã bao gồm trong scikit-learn)
+# R², NSE, MAE, RMSE
