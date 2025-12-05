@@ -1,5 +1,17 @@
 # 📚 TÀI LIỆU HỎI ĐÁP - TRAFFIC VOLUME FORECASTING PROJECT
 
+## MỤC LỤC
+
+- [PHẦN 1: CÂU HỎI LIÊN QUAN ĐẾN CODE](#phần-1-câu-hỏi-liên-quan-đến-code)
+  - [1.1 Hiểu dữ liệu](#11-hiểu-dữ-liệu-được-sử-dụng-trong-project)
+  - [1.2 Tiền xử lý dữ liệu](#12-hiểu-cách-tiền-xử-lý-dữ-liệu)
+  - [1.3 Kiến trúc Encoder-Decoder](#13-hiểu-thiết-kế-kiến-trúc-của-các-mạng-được-sử-dụng)
+  - [1.4 Optuna Hyperparameter Optimization](#14-optuna-hyperparameter-optimization)
+  - [1.5 Phương pháp đánh giá Model](#15-hiểu-phương-pháp-đánh-giá-chất-lượng-các-model)
+- [PHẦN 2: CÂU HỎI LÝ THUYẾT](#phần-2-câu-hỏi-lý-thuyết)
+
+---
+
 ## PHẦN 1: CÂU HỎI LIÊN QUAN ĐẾN CODE
 
 ---
@@ -11,6 +23,11 @@
 **Dataset:** Metro Interstate Traffic Volume  
 **Nguồn:** UCI Machine Learning Repository  
 **Mục tiêu:** Dự báo lưu lượng giao thông (`traffic_volume`) cho 5 giờ tiếp theo
+
+**Bài toán:** Đây là bài toán **Multi-step Time Series Forecasting** (Dự báo chuỗi thời gian nhiều bước):
+- **Input:** 24 giờ dữ liệu lịch sử (24 timesteps × 22 features)
+- **Output:** 5 giá trị traffic_volume cho 5 giờ tiếp theo (t+1, t+2, t+3, t+4, t+5)
+- **Mô hình:** LSTM Encoder-Decoder (Seq2Seq)
 
 #### 1.1.2 Các thuộc tính trong dữ liệu gốc
 
@@ -116,20 +133,6 @@ Sau quá trình Feature Engineering, các features mới được tạo:
 **Tóm tắt:**
 - **X_train:** Sử dụng **22 features** (bao gồm cả traffic_volume) trong **24 timesteps**
 - **y_train:** Chỉ sử dụng **traffic_volume** cho **5 timesteps tiếp theo**
-
-#### 1.1.5 Lý do không dùng Lag/Rolling/Diff Features
-
-```
-❌ KHÔNG SỬ DỤNG:
-   - traffic_lag_1h, traffic_lag_24h (lag features)
-   - rolling_mean_24h, rolling_std_6h (rolling statistics)
-   - diff_1h, pct_change (difference features)
-
-✅ LÝ DO:
-   1. LSTM tự học temporal patterns từ sequence input
-   2. Input đã có 24 giờ lịch sử → model "thấy" được lag information
-   3. Thêm lag features thủ công → data leakage khi tạo sequences
-```
 
 ---
 
@@ -477,9 +480,296 @@ Combined: concat(forward, backward) → richer representation
 
 ---
 
-### 1.4 HIỂU PHƯƠNG PHÁP ĐÁNH GIÁ CHẤT LƯỢNG CÁC MODEL
+### 1.4 OPTUNA HYPERPARAMETER OPTIMIZATION
 
-#### 1.4.1 Các Metrics được sử dụng
+#### 1.4.1 Optuna là gì?
+
+**Optuna** là một framework tự động tối ưu hóa hyperparameters (AutoML) với các đặc điểm:
+
+1. **Define-by-Run API:** Định nghĩa search space linh hoạt trong code
+2. **Efficient Sampling:** Sử dụng thuật toán TPE (Tree-structured Parzen Estimator)
+3. **Pruning:** Dừng sớm các trials không hứa hẹn để tiết kiệm thời gian
+4. **Visualization:** Cung cấp các công cụ visualize kết quả
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    OPTUNA OPTIMIZATION FLOW                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────┐                                                       │
+│  │ Search Space │  Định nghĩa khoảng giá trị cho mỗi hyperparameter    │
+│  └──────┬───────┘                                                       │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌──────────────┐                                                       │
+│  │   Sampler    │  TPE chọn giá trị hyperparameters thông minh         │
+│  │    (TPE)     │  dựa trên kết quả các trials trước                    │
+│  └──────┬───────┘                                                       │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌──────────────┐                                                       │
+│  │    Trial     │  Huấn luyện model với hyperparameters được chọn      │
+│  │  (Training)  │                                                       │
+│  └──────┬───────┘                                                       │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌──────────────┐                                                       │
+│  │   Pruner     │  Dừng sớm nếu trial không tốt (MedianPruner)         │
+│  └──────┬───────┘                                                       │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌──────────────┐                                                       │
+│  │  Objective   │  Trả về validation loss để Optuna đánh giá           │
+│  │    Value     │                                                       │
+│  └──────┬───────┘                                                       │
+│         │                                                               │
+│         └──────────► Lặp lại cho n_trials                              │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1.4.2 Các Hyperparameters được tối ưu
+
+Trong project này, Optuna tối ưu **7 hyperparameters**:
+
+| Hyperparameter | Search Space | Ý nghĩa | Tác dụng |
+|----------------|--------------|---------|----------|
+| **hidden_size** | [64, 128, 256] | Số neurons trong hidden layer của LSTM | Càng lớn → model càng phức tạp, học được patterns phức tạp hơn, nhưng dễ overfit |
+| **num_layers** | [1, 2, 3] | Số LSTM layers xếp chồng | Nhiều layers → học hierarchical features, nhưng khó train hơn |
+| **dropout** | (0.1, 0.5) | Tỷ lệ dropout giữa các layers | Regularization, giảm overfitting |
+| **learning_rate** | (1e-4, 1e-2) | Tốc độ học của optimizer | Quá cao → không hội tụ, quá thấp → train chậm |
+| **batch_size** | [32, 64, 128] | Số samples trong 1 batch | Ảnh hưởng đến gradient estimation và memory |
+| **weight_decay** | (1e-6, 1e-3) | L2 regularization strength | Giảm overfitting bằng cách penalize large weights |
+| **teacher_forcing_ratio** | (0.3, 0.7) | Tỷ lệ dùng ground truth khi train decoder | Cân bằng giữa học nhanh và exposure bias |
+
+#### 1.4.3 Chi tiết từng Hyperparameter
+
+##### A. Hidden Size (64, 128, 256)
+
+```
+hidden_size = 64:        hidden_size = 256:
+┌────────────────┐       ┌────────────────────────────────────┐
+│  64 neurons    │       │         256 neurons                │
+│  Ít parameters │       │         Nhiều parameters           │
+│  Nhanh train   │       │         Chậm train                 │
+│  Có thể underfitｾ      │         Có thể overfit             │
+└────────────────┘       └────────────────────────────────────┘
+```
+
+**Tác dụng:**
+- Quyết định **capacity** (khả năng học) của model
+- hidden_size = 64 được chọn: Đủ để capture patterns mà không overfit
+
+##### B. Number of Layers (1, 2, 3)
+
+```
+1 Layer:           2 Layers:              3 Layers:
+┌─────┐           ┌─────┐                ┌─────┐
+│LSTM │           │LSTM │ ← Layer 2      │LSTM │ ← Layer 3
+└─────┘           └─────┘                └─────┘
+                  ┌─────┐                ┌─────┐
+                  │LSTM │ ← Layer 1      │LSTM │ ← Layer 2
+                  └─────┘                └─────┘
+                                         ┌─────┐
+                                         │LSTM │ ← Layer 1
+                                         └─────┘
+```
+
+**Tác dụng:**
+- Nhiều layers = học **hierarchical representations**
+- Layer 1: Low-level patterns (trends ngắn hạn)
+- Layer 2+: High-level patterns (trends dài hạn)
+- num_layers = 2 được chọn: Balance giữa capacity và training difficulty
+
+##### C. Dropout (0.1 - 0.5)
+
+```python
+# Dropout hoạt động trong training:
+# Randomly "tắt" một số neurons với xác suất p
+
+Input:  [0.5, 0.3, 0.8, 0.2, 0.6]
+              ↓ dropout=0.3
+Output: [0.5, 0.0, 0.8, 0.0, 0.6]  # 30% neurons bị tắt
+              ↓ scale by 1/(1-p)
+Output: [0.71, 0.0, 1.14, 0.0, 0.86]  # Scale để giữ expected value
+```
+
+**Tác dụng:**
+- **Regularization:** Giảm overfitting bằng cách buộc model không phụ thuộc vào bất kỳ neuron nào
+- **Ensemble effect:** Như train nhiều sub-networks rồi average
+- dropout ≈ 0.25 được chọn: Vừa đủ regularization
+
+##### D. Learning Rate (1e-4 - 1e-2)
+
+```
+Learning Rate quá cao (0.01):     Learning Rate quá thấp (0.0001):
+        Loss                              Loss
+          │                                 │
+          │  ╱╲  ╱╲                         │ ────────────────
+          │ ╱  ╲╱  ╲                        │          ╲
+          │╱        ╲                       │           ╲
+          └──────────►                      └──────────────►
+            Epochs                              Epochs
+      Oscillating, không hội tụ           Hội tụ chậm, tốn thời gian
+
+Learning Rate phù hợp (~0.001):
+        Loss
+          │
+          │╲
+          │ ╲
+          │  ╲────────
+          └──────────────►
+              Epochs
+      Hội tụ nhanh và ổn định
+```
+
+**Tác dụng:**
+- Quyết định **step size** khi update weights
+- lr ≈ 0.0015 được chọn: Hội tụ nhanh mà ổn định
+
+##### E. Batch Size (32, 64, 128)
+
+| Batch Size | Ưu điểm | Nhược điểm |
+|------------|---------|------------|
+| 32 (nhỏ) | Gradient noisy → better generalization | Chậm (nhiều updates/epoch) |
+| 128 (lớn) | Nhanh, stable gradients | Có thể converge đến sharp minima |
+| 64 (vừa) | Balance giữa speed và generalization | - |
+
+**Tác dụng:**
+- batch_size = 64 được chọn: Cân bằng tốc độ và chất lượng
+
+##### F. Weight Decay (1e-6 - 1e-3)
+
+```python
+# L2 Regularization: Thêm penalty vào loss
+# Loss_total = Loss_original + weight_decay * Σ(w²)
+
+# weight_decay = 0.0004:
+# Penalize các weights lớn → model đơn giản hơn → giảm overfit
+```
+
+**Tác dụng:**
+- **L2 regularization** trong optimizer
+- Giữ weights nhỏ → model ít overfit
+
+##### G. Teacher Forcing Ratio (0.3 - 0.7)
+
+```
+Teacher Forcing Ratio = 0.5:
+
+Training Step t=1:
+  Input: last_known_value
+  Output: prediction_1
+  
+Training Step t=2:
+  if random() < 0.5:   # 50% chance
+      Input = ground_truth[1]     # Teacher Forcing: dùng đáp án đúng
+  else:
+      Input = prediction_1        # Autoregressive: dùng prediction
+  Output: prediction_2
+```
+
+**Tác dụng:**
+- **Teacher Forcing = 1.0:** Luôn dùng ground truth → train nhanh nhưng **exposure bias** (inference khác training)
+- **Teacher Forcing = 0.0:** Luôn dùng prediction → train chậm, dễ error accumulation
+- **Teacher Forcing ≈ 0.65:** Cân bằng giữa train nhanh và giảm exposure bias
+
+#### 1.4.4 Kết quả Optuna trong Project
+
+**Best Hyperparameters tìm được:**
+
+```json
+{
+    "hidden_size": 64,
+    "num_layers": 2,
+    "dropout": 0.248,
+    "learning_rate": 0.00155,
+    "batch_size": 64,
+    "weight_decay": 0.000379,
+    "teacher_forcing_ratio": 0.648
+}
+```
+
+**Phân tích kết quả:**
+
+| Hyperparameter | Giá trị | Nhận xét |
+|----------------|---------|----------|
+| hidden_size = 64 | Nhỏ nhất | Data không quá phức tạp, 64 đủ capacity |
+| num_layers = 2 | Trung bình | Cần hierarchy nhưng không quá sâu |
+| dropout ≈ 0.25 | Trung bình | Regularization vừa phải |
+| lr ≈ 0.0015 | Cao hơn default | Model có thể học nhanh |
+| batch_size = 64 | Trung bình | Balance speed và generalization |
+| weight_decay ≈ 0.0004 | Nhỏ | Không cần quá nhiều L2 reg |
+| teacher_forcing ≈ 0.65 | Cao | Ưu tiên learning speed |
+
+#### 1.4.5 Code Optuna trong Project
+
+```python
+class Seq2SeqObjective:
+    """Objective function cho Optuna optimization"""
+    
+    def __call__(self, trial: optuna.Trial) -> float:
+        # 1. Sample hyperparameters từ search space
+        hidden_size = trial.suggest_categorical('hidden_size', [64, 128, 256])
+        num_layers = trial.suggest_categorical('num_layers', [1, 2, 3])
+        dropout = trial.suggest_float('dropout', 0.1, 0.5)
+        lr = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+        batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
+        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+        teacher_forcing = trial.suggest_float('teacher_forcing_ratio', 0.3, 0.7)
+        
+        # 2. Build model với hyperparameters được chọn
+        model = build_model(
+            input_size=self.input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            ...
+        )
+        
+        # 3. Training loop với early stopping
+        for epoch in range(self.n_epochs):
+            train_loss = train_one_epoch(...)
+            val_loss = validate(...)
+            
+            # 4. Report để Optuna có thể prune
+            trial.report(val_loss, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+        
+        # 5. Return validation loss (minimize)
+        return best_val_loss
+
+
+# Run optimization
+study = optuna.create_study(
+    direction="minimize",  # Minimize validation loss
+    pruner=optuna.pruners.MedianPruner()  # Prune trials tệ hơn median
+)
+study.optimize(objective, n_trials=50, timeout=3600)
+```
+
+#### 1.4.6 Pruning - Dừng sớm trials không tốt
+
+```
+Trial 1: val_loss = [0.5, 0.4, 0.3, 0.25, 0.22] → Complete ✓
+Trial 2: val_loss = [0.6, 0.55, 0.52, ...     ] → Pruned ✗ (worse than median)
+Trial 3: val_loss = [0.45, 0.35, 0.28, 0.23, 0.20] → Complete ✓ (Best!)
+Trial 4: val_loss = [0.7, 0.65, ...           ] → Pruned ✗
+...
+
+MedianPruner: Nếu val_loss tại epoch t > median của các trials khác tại epoch t → Prune
+```
+
+**Tác dụng:**
+- Tiết kiệm thời gian bằng cách dừng sớm các trials không hứa hẹn
+- Tập trung resources vào các trials có tiềm năng
+
+---
+
+### 1.5 HIỂU PHƯƠNG PHÁP ĐÁNH GIÁ CHẤT LƯỢNG CÁC MODEL
+
+#### 1.5.1 Các Metrics được sử dụng
 
 **1. R² (Coefficient of Determination)**
 
