@@ -19,7 +19,6 @@ Dự đoán lưu lượng giao thông (traffic_volume) sử dụng mô hình **L
 - ✅ **Cyclical encoding**: sin/cos cho hour, day, month
 - ✅ **Weather features**: temp, temp_celsius, clouds_all, rain_1h, snow_1h, is_rainy, is_snowy
 - ✅ **Interaction**: rush_rain
-- ❌ **NO lag/rolling/diff features** - LSTM học từ sequences, tránh data leakage
 
 ### Segment-based Data Preparation
 - Dữ liệu có ~2,588 gaps (timestamps bị thiếu)
