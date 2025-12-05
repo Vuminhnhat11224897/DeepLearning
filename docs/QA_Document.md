@@ -306,7 +306,46 @@ X_test_scaled = scaler.transform(X_test)        # Chỉ Transform
 
 ### 1.3 HIỂU THIẾT KẾ KIẾN TRÚC CỦA CÁC MẠNG ĐƯỢC SỬ DỤNG
 
-#### 1.3.1 Tổng quan kiến trúc Encoder-Decoder (Seq2Seq)
+#### 1.3.1 Tại sao dùng Encoder-Decoder cho bài toán này?
+
+**Bài toán:** Dự báo chuỗi thời gian nhiều bước (Multi-step Forecasting)
+- **Input:** Sequence có độ dài 24 (24 giờ lịch sử)
+- **Output:** Sequence có độ dài 5 (5 giờ dự báo)
+
+**Vấn đề với các phương pháp truyền thống:**
+
+| Phương pháp | Mô tả | Nhược điểm |
+|-------------|-------|------------|
+| **Direct Multi-Output** | 1 model → 5 outputs cùng lúc | Không capture dependencies giữa các outputs |
+| **Recursive (Iterated)** | Predict t+1, dùng làm input predict t+2,... | Error accumulation nghiêm trọng |
+| **Direct (5 models)** | 5 models riêng biệt | Không share knowledge, tốn resources |
+
+**Giải pháp: Encoder-Decoder (Seq2Seq)**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TẠI SAO ENCODER-DECODER?                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. ENCODER:                                                            │
+│     - Đọc TOÀN BỘ 24 giờ lịch sử                                       │
+│     - Nén thông tin thành "Context Vector"                             │
+│     - Context chứa đủ thông tin để dự báo                              │
+│                                                                         │
+│  2. DECODER:                                                            │
+│     - Sinh output TUẦN TỰ: t+1 → t+2 → t+3 → t+4 → t+5                │
+│     - Mỗi step nhận: context + output của step trước                   │
+│     - Capture được dependencies giữa các predictions                   │
+│                                                                         │
+│  3. LỢI ÍCH:                                                            │
+│     - Flexible input/output length (24 → 5)                            │
+│     - Sequential generation (như language model)                        │
+│     - Teacher forcing giúp train ổn định                                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1.3.2 Kiến trúc tổng quan
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -314,169 +353,463 @@ X_test_scaled = scaler.transform(X_test)        # Chỉ Transform
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  INPUT: (batch_size, 24, 22)                                           │
-│  - batch_size: số samples                                              │
+│  - batch_size: số samples trong 1 batch                                │
 │  - 24: sequence length (24 giờ lịch sử)                                │
-│  - 22: số features                                                     │
+│  - 22: số features (traffic_volume + các features khác)                │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────┐     │
 │  │                      ENCODER                                   │     │
 │  │  ┌─────────────────────────────────────────────────────────┐  │     │
 │  │  │  Bidirectional LSTM                                      │  │     │
 │  │  │  - input_size: 22 (số features)                          │  │     │
-│  │  │  - hidden_size: 64/128/256                               │  │     │
-│  │  │  - num_layers: 2                                         │  │     │
-│  │  │  - bidirectional: True                                   │  │     │
-│  │  │  - dropout: 0.2-0.3                                      │  │     │
+│  │  │  - hidden_size: 64 (optimized by Optuna)                 │  │     │
+│  │  │  - num_layers: 2 (stacked LSTM)                          │  │     │
+│  │  │  - bidirectional: True (forward + backward)              │  │     │
+│  │  │  - dropout: 0.248                                        │  │     │
 │  │  └─────────────────────────────────────────────────────────┘  │     │
 │  │                           │                                    │     │
 │  │                           ▼                                    │     │
 │  │  ┌─────────────────────────────────────────────────────────┐  │     │
-│  │  │  Linear Projection (if bidirectional)                   │  │     │
-│  │  │  - hidden_size * 2 → hidden_size                        │  │     │
+│  │  │  Linear Projection (vì bidirectional)                   │  │     │
+│  │  │  - 64*2 = 128 → 64                                       │  │     │
 │  │  └─────────────────────────────────────────────────────────┘  │     │
 │  │                           │                                    │     │
 │  │                           ▼                                    │     │
-│  │  Output: (hidden_state, cell_state)                           │     │
-│  │  - hidden: (num_layers, batch, hidden_size)                   │     │
-│  │  - cell: (num_layers, batch, hidden_size)                     │     │
+│  │  Output: (hidden_state, cell_state) = "Context Vector"        │     │
+│  │  - hidden: (2, batch, 64) → 2 layers, 64 dimensions          │     │
+│  │  - cell: (2, batch, 64) → memory của LSTM                    │     │
 │  └───────────────────────────────────────────────────────────────┘     │
 │                              │                                          │
-│                              │ Context Vector                           │
+│                              │ Context Vector truyền sang Decoder       │
 │                              ▼                                          │
 │  ┌───────────────────────────────────────────────────────────────┐     │
 │  │                      DECODER                                   │     │
 │  │                                                                │     │
-│  │  for t in range(5):  # 5 output steps                         │     │
+│  │  Lặp 5 lần (5 output steps):                                  │     │
 │  │      ┌─────────────────────────────────────────────────────┐  │     │
 │  │      │  LSTM Cell                                           │  │     │
-│  │      │  - input: previous_output (or teacher forcing)       │  │     │
-│  │      │  - hidden_state, cell_state from encoder/prev step   │  │     │
+│  │      │  - input: previous_output (hoặc ground truth)        │  │     │
+│  │      │  - hidden: từ encoder hoặc step trước                │  │     │
+│  │      │  - cell: từ encoder hoặc step trước                  │  │     │
 │  │      └─────────────────────────────────────────────────────┘  │     │
 │  │                           │                                    │     │
 │  │                           ▼                                    │     │
 │  │      ┌─────────────────────────────────────────────────────┐  │     │
-│  │      │  Fully Connected Layer                               │  │     │
-│  │      │  - hidden_size → 1                                   │  │     │
+│  │      │  Fully Connected: hidden_size → 1                    │  │     │
+│  │      │  Output: 1 giá trị traffic_volume                    │  │     │
 │  │      └─────────────────────────────────────────────────────┘  │     │
 │  │                           │                                    │     │
 │  │                           ▼                                    │     │
-│  │      prediction[t] = output                                   │     │
+│  │      predictions[t] = output value                            │     │
 │  │                                                                │     │
 │  └───────────────────────────────────────────────────────────────┘     │
 │                                                                         │
 │  OUTPUT: (batch_size, 5)                                               │
-│  - 5 giá trị traffic_volume dự báo cho t+1, t+2, t+3, t+4, t+5        │
+│  - 5 giá trị traffic_volume cho t+1, t+2, t+3, t+4, t+5               │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 1.3.2 Chi tiết Encoder
+#### 1.3.3 ENCODER - Chi tiết hoạt động
+
+##### A. LSTM Cell - Đơn vị cơ bản
+
+**LSTM (Long Short-Term Memory)** giải quyết vấn đề vanishing gradient của RNN thông thường bằng cách sử dụng **3 cổng** và **cell state**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         LSTM CELL CHI TIẾT                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Input tại timestep t:                                                  │
+│  • x_t: input vector (22 features)                                     │
+│  • h_{t-1}: hidden state từ timestep trước                             │
+│  • C_{t-1}: cell state từ timestep trước                               │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  FORGET GATE (Cổng quên): Quyết định quên thông tin nào        │   │
+│  │                                                                  │   │
+│  │  f_t = σ(W_f · [h_{t-1}, x_t] + b_f)                            │   │
+│  │                                                                  │   │
+│  │  • f_t ≈ 0: Quên thông tin từ cell state cũ                    │   │
+│  │  • f_t ≈ 1: Giữ thông tin từ cell state cũ                     │   │
+│  │                                                                  │   │
+│  │  Ví dụ Traffic: Khi chuyển từ ngày thường → ngày lễ,            │   │
+│  │  forget gate "quên" patterns ngày thường                        │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  INPUT GATE (Cổng đầu vào): Quyết định thêm thông tin mới nào  │   │
+│  │                                                                  │   │
+│  │  i_t = σ(W_i · [h_{t-1}, x_t] + b_i)     ← Lọc thông tin        │   │
+│  │  C̃_t = tanh(W_C · [h_{t-1}, x_t] + b_C)  ← Thông tin mới        │   │
+│  │                                                                  │   │
+│  │  • i_t quyết định bao nhiêu của C̃_t được thêm vào              │   │
+│  │                                                                  │   │
+│  │  Ví dụ Traffic: Khi có mưa lớn đột ngột,                        │   │
+│  │  input gate thêm thông tin "mưa ảnh hưởng traffic"              │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  CELL STATE UPDATE: Cập nhật bộ nhớ dài hạn                    │   │
+│  │                                                                  │   │
+│  │  C_t = f_t ⊙ C_{t-1} + i_t ⊙ C̃_t                               │   │
+│  │        ↑                   ↑                                     │   │
+│  │        Quên bớt           Thêm mới                               │   │
+│  │                                                                  │   │
+│  │  Cell state là "highway" cho gradient flow                       │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  OUTPUT GATE (Cổng đầu ra): Quyết định output gì                │   │
+│  │                                                                  │   │
+│  │  o_t = σ(W_o · [h_{t-1}, x_t] + b_o)                            │   │
+│  │  h_t = o_t ⊙ tanh(C_t)                                          │   │
+│  │                                                                  │   │
+│  │  • Lọc thông tin từ cell state thành hidden state               │   │
+│  │  • h_t được dùng cho prediction và truyền sang timestep tiếp    │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  Output:                                                                │
+│  • h_t: hidden state (cho layer tiếp theo hoặc output)                 │
+│  • C_t: cell state (truyền sang timestep tiếp theo)                    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### B. Bidirectional LSTM
+
+Encoder sử dụng **Bidirectional LSTM** - xử lý sequence theo 2 hướng:
+
+```
+Input Sequence: [x_1, x_2, x_3, ..., x_24]
+
+Forward LSTM (→):
+   x_1 ──► h_1^f ──► h_2^f ──► h_3^f ──► ... ──► h_24^f
+           │         │         │                  │
+   Học patterns từ quá khứ đến hiện tại
+
+Backward LSTM (←):
+   x_1 ◄── h_1^b ◄── h_2^b ◄── h_3^b ◄── ... ◄── h_24^b
+           │         │         │                  │
+   Học patterns từ tương lai về quá khứ
+
+Combined output tại mỗi timestep t:
+   h_t = [h_t^f ; h_t^b]  (concatenate)
+   
+   → Mỗi h_t chứa thông tin từ CẢ 2 HƯỚNG
+```
+
+**Tại sao cần Bidirectional?**
+
+```
+Ví dụ: Traffic tại 8:00 (giờ cao điểm sáng)
+
+Forward only:  Chỉ thấy 7:00, 6:00, 5:00... → biết đang đến rush hour
+Backward only: Chỉ thấy 9:00, 10:00... → biết rush hour sắp kết thúc
+Bidirectional: Thấy CẢ HAI → hiểu đầy đủ context của rush hour
+```
+
+##### C. Code Encoder
 
 ```python
 class Encoder(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=2, 
+    def __init__(self, input_size, hidden_size=64, num_layers=2, 
                  dropout=0.2, bidirectional=True):
         super(Encoder, self).__init__()
         
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bidirectional = bidirectional
+        self.num_directions = 2 if bidirectional else 1
+        
+        # Bidirectional LSTM
         self.lstm = nn.LSTM(
             input_size=input_size,      # 22 features
-            hidden_size=hidden_size,    # 128
-            num_layers=num_layers,      # 2 layers stacked
-            batch_first=True,           # Input: (batch, seq, features)
-            dropout=dropout,            # Dropout between layers
-            bidirectional=bidirectional # Đọc cả 2 chiều
+            hidden_size=hidden_size,    # 64
+            num_layers=num_layers,      # 2 stacked layers
+            batch_first=True,           # (batch, seq, features)
+            dropout=dropout,            # Dropout giữa layers
+            bidirectional=bidirectional
         )
         
-        # Project bidirectional output back to hidden_size
+        # Projection layers: 64*2 → 64 (để match với Decoder)
         if bidirectional:
             self.fc_hidden = nn.Linear(hidden_size * 2, hidden_size)
             self.fc_cell = nn.Linear(hidden_size * 2, hidden_size)
     
     def forward(self, x):
-        # x: (batch, 24, 22)
+        """
+        x: (batch, 24, 22) - 24 timesteps, 22 features
+        
+        Returns:
+        - outputs: (batch, 24, 64*2) - all hidden states
+        - (hidden, cell): final states, each (2, batch, 64)
+        """
+        # LSTM forward pass
         outputs, (hidden, cell) = self.lstm(x)
-        # outputs: (batch, 24, hidden_size * 2) if bidirectional
-        # hidden: (num_layers * 2, batch, hidden_size)
+        # outputs: (batch, 24, 128) nếu bidirectional
+        # hidden: (4, batch, 64) = 2 layers × 2 directions
         
         if self.bidirectional:
-            # Combine forward and backward states
-            hidden = self.fc_hidden(...)  # → (num_layers, batch, hidden_size)
-            cell = self.fc_cell(...)
+            # Reshape: (num_layers * 2, batch, hidden) → (num_layers, batch, hidden * 2)
+            batch_size = hidden.shape[1]
+            
+            # Tách forward và backward cho mỗi layer
+            hidden = hidden.view(self.num_layers, 2, batch_size, self.hidden_size)
+            cell = cell.view(self.num_layers, 2, batch_size, self.hidden_size)
+            
+            # Concatenate forward và backward
+            hidden = torch.cat([hidden[:, 0, :, :], hidden[:, 1, :, :]], dim=2)
+            cell = torch.cat([cell[:, 0, :, :], cell[:, 1, :, :]], dim=2)
+            
+            # Project 128 → 64
+            hidden = self.fc_hidden(hidden)  # (2, batch, 64)
+            cell = self.fc_cell(cell)        # (2, batch, 64)
         
         return outputs, (hidden, cell)
 ```
 
-#### 1.3.3 Chi tiết Decoder
+#### 1.3.4 DECODER - Chi tiết hoạt động
+
+##### A. Cách Decoder sinh output
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    DECODER STEP-BY-STEP                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Nhận từ Encoder:                                                       │
+│  • hidden_0 = encoder_hidden (context về toàn bộ input)                │
+│  • cell_0 = encoder_cell                                               │
+│                                                                         │
+│  STEP t=0 (predict t+1):                                               │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  input_0 = last_traffic_volume từ input sequence                 │  │
+│  │           (giá trị traffic cuối cùng mà model "biết")            │  │
+│  │                          ↓                                        │  │
+│  │  ┌──────────────────────────────────────────────────────────┐    │  │
+│  │  │         LSTM Cell                                        │    │  │
+│  │  │  input: input_0, hidden_0, cell_0                        │    │  │
+│  │  │  output: hidden_1, cell_1                                │    │  │
+│  │  └──────────────────────────────────────────────────────────┘    │  │
+│  │                          ↓                                        │  │
+│  │  ┌──────────────────────────────────────────────────────────┐    │  │
+│  │  │  Fully Connected: hidden_1 → prediction_0                │    │  │
+│  │  │  prediction_0 = traffic_volume tại t+1                   │    │  │
+│  │  └──────────────────────────────────────────────────────────┘    │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  STEP t=1 (predict t+2):                                               │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  if Teacher Forcing (random < 0.65):                              │  │
+│  │      input_1 = ground_truth[t+1]  ← Dùng đáp án đúng             │  │
+│  │  else:                                                            │  │
+│  │      input_1 = prediction_0       ← Dùng prediction vừa sinh     │  │
+│  │                          ↓                                        │  │
+│  │  LSTM Cell(input_1, hidden_1, cell_1) → hidden_2, cell_2          │  │
+│  │                          ↓                                        │  │
+│  │  FC(hidden_2) → prediction_1 = traffic_volume tại t+2            │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+│  ... Lặp tương tự cho t=2,3,4 ...                                      │
+│                                                                         │
+│  Final Output: [prediction_0, prediction_1, ..., prediction_4]         │
+│               = [traffic_t+1, traffic_t+2, ..., traffic_t+5]           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### B. Teacher Forcing - Kỹ thuật huấn luyện
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TEACHER FORCING EXPLAINED                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  VẤN ĐỀ: Autoregressive Decoding                                       │
+│  ────────────────────────────────                                       │
+│  • Decoder dùng output của step trước làm input cho step tiếp          │
+│  • Nếu step đầu sai → error lan truyền (error accumulation)            │
+│                                                                         │
+│  Không có Teacher Forcing:                                              │
+│  ─────────────────────────                                              │
+│  True:    [1000, 1100, 1200, 1150, 1050]                               │
+│  Step 0:  Predict 1000 → OK                                            │
+│  Step 1:  Input=1000, Predict 1080 (sai 20)                            │
+│  Step 2:  Input=1080 (đã sai), Predict 1250 (sai 50)                   │
+│  Step 3:  Input=1250 (sai hơn), Predict 1400 (sai 250!)                │
+│  → Error tích lũy ngày càng lớn!                                       │
+│                                                                         │
+│  VỚI Teacher Forcing (ratio = 0.65):                                   │
+│  ───────────────────────────────────                                   │
+│  True:    [1000, 1100, 1200, 1150, 1050]                               │
+│  Step 0:  Predict 1000                                                 │
+│  Step 1:  Random < 0.65 → Input = TRUE 1100, Predict 1095              │
+│           (Model học từ đáp án đúng, không bị ảnh hưởng bởi error)     │
+│  Step 2:  Random > 0.65 → Input = predicted 1095, Predict 1185         │
+│           (Model cũng học xử lý khi input không hoàn hảo)              │
+│                                                                         │
+│  → Cân bằng giữa:                                                       │
+│    • Học nhanh (dùng ground truth)                                     │
+│    • Robust (quen với imperfect input)                                 │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Decay Teacher Forcing Ratio:**
+
+```python
+# Trong training, giảm dần teacher forcing theo epoch
+current_tf_ratio = teacher_forcing_ratio * (1 - epoch / num_epochs)
+
+# Epoch 1:  tf_ratio = 0.65 * (1 - 0/100) = 0.65 (dùng nhiều ground truth)
+# Epoch 50: tf_ratio = 0.65 * (1 - 50/100) = 0.325
+# Epoch 99: tf_ratio = 0.65 * (1 - 99/100) ≈ 0.007 (gần như autoregressive)
+
+# → Model dần quen với việc dùng chính predictions của mình
+```
+
+##### C. Code Decoder
 
 ```python
 class Decoder(nn.Module):
-    def __init__(self, output_size=1, hidden_size=128, num_layers=2, dropout=0.2):
+    def __init__(self, output_size=1, hidden_size=64, num_layers=2, dropout=0.2):
         super(Decoder, self).__init__()
         
+        self.output_size = output_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        # LSTM: input là 1 giá trị (previous traffic_volume)
         self.lstm = nn.LSTM(
-            input_size=output_size,     # 1 (previous prediction)
-            hidden_size=hidden_size,
-            num_layers=num_layers,
+            input_size=output_size,     # 1
+            hidden_size=hidden_size,    # 64
+            num_layers=num_layers,      # 2
             batch_first=True,
             dropout=dropout
         )
         
-        self.fc = nn.Linear(hidden_size, output_size)  # → 1
+        # Fully Connected: hidden → 1 output
+        self.fc = nn.Linear(hidden_size, output_size)
     
     def forward(self, x, hidden, cell):
-        # x: (batch, 1, 1) - previous output
+        """
+        x: (batch, 1, 1) - previous output/ground truth
+        hidden: (2, batch, 64) - từ encoder hoặc step trước
+        cell: (2, batch, 64)
+        
+        Returns:
+        - prediction: (batch, 1, 1)
+        - (hidden, cell): updated states
+        """
         output, (hidden, cell) = self.lstm(x, (hidden, cell))
+        # output: (batch, 1, 64)
+        
         prediction = self.fc(output)  # (batch, 1, 1)
         
         return prediction, (hidden, cell)
 ```
 
-#### 1.3.4 Teacher Forcing
+#### 1.3.5 Seq2Seq - Kết hợp Encoder và Decoder
 
 ```python
-def forward(self, x, target=None, teacher_forcing_ratio=0.5):
-    # Encode
-    _, (hidden, cell) = self.encoder(x)
-    
-    # Initial decoder input: last known traffic_volume
-    decoder_input = x[:, -1, 0].unsqueeze(1).unsqueeze(2)  # (batch, 1, 1)
-    
-    outputs = []
-    for t in range(5):  # 5 prediction steps
-        prediction, (hidden, cell) = self.decoder(decoder_input, hidden, cell)
-        outputs.append(prediction)
+class Seq2Seq(nn.Module):
+    def __init__(self, encoder, decoder, output_seq_len=5, device=None):
+        super(Seq2Seq, self).__init__()
         
-        # Teacher Forcing: dùng ground truth với xác suất teacher_forcing_ratio
-        if target is not None and random.random() < teacher_forcing_ratio:
-            decoder_input = target[:, t].unsqueeze(1).unsqueeze(2)  # Use true value
-        else:
-            decoder_input = prediction  # Use predicted value
+        self.encoder = encoder
+        self.decoder = decoder
+        self.output_seq_len = output_seq_len  # 5 steps
+        self.device = device
     
-    return torch.cat(outputs, dim=1)  # (batch, 5)
+    def forward(self, x, target=None, teacher_forcing_ratio=0.5):
+        """
+        x: (batch, 24, 22) - input sequence
+        target: (batch, 5) - ground truth (for teacher forcing)
+        teacher_forcing_ratio: probability of using ground truth
+        
+        Returns: (batch, 5) - 5 predictions
+        """
+        batch_size = x.shape[0]
+        
+        # 1. ENCODE: Nén 24 timesteps thành context vector
+        _, (hidden, cell) = self.encoder(x)
+        # hidden, cell: (2, batch, 64) - context từ toàn bộ input
+        
+        # 2. DECODE: Sinh 5 outputs tuần tự
+        
+        # Initial input: last traffic_volume từ input sequence
+        # x[:, -1, 0] = traffic_volume tại timestep cuối cùng
+        decoder_input = x[:, -1, 0].unsqueeze(1).unsqueeze(2)  # (batch, 1, 1)
+        
+        outputs = []
+        
+        for t in range(self.output_seq_len):  # 5 steps
+            # Decode 1 step
+            prediction, (hidden, cell) = self.decoder(decoder_input, hidden, cell)
+            outputs.append(prediction.squeeze(2))  # (batch, 1)
+            
+            # Chọn input cho step tiếp theo
+            if target is not None and torch.rand(1).item() < teacher_forcing_ratio:
+                # Teacher Forcing: dùng ground truth
+                decoder_input = target[:, t].unsqueeze(1).unsqueeze(2)
+            else:
+                # Autoregressive: dùng prediction vừa sinh
+                decoder_input = prediction
+        
+        # Concatenate: [(batch, 1), ...] → (batch, 5)
+        outputs = torch.cat(outputs, dim=1)
+        
+        return outputs
 ```
 
-**Tác dụng của Teacher Forcing:**
-- Trong training: Đôi khi dùng ground truth thay vì prediction làm input cho step tiếp theo
-- Giúp model học nhanh hơn, ổn định hơn
-- Tỷ lệ giảm dần theo epoch: `current_tf_ratio = tf_ratio * (1 - epoch/num_epochs)`
-
-#### 1.3.5 Tại sao dùng Bidirectional Encoder?
+#### 1.3.6 Flow hoàn chỉnh một Forward Pass
 
 ```
-Forward LSTM:  t=0 → t=1 → t=2 → ... → t=23
-                                         ↓
-                              forward_hidden_state
-                              
-Backward LSTM: t=0 ← t=1 ← t=2 ← ... ← t=23
-                ↓
-     backward_hidden_state
-
-Combined: concat(forward, backward) → richer representation
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 COMPLETE FORWARD PASS EXAMPLE                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  INPUT: batch_size=32, seq_len=24, features=22                         │
+│  X shape: (32, 24, 22)                                                 │
+│                                                                         │
+│  ═══════════════════════════════════════════════════════════════════   │
+│  ENCODER                                                                │
+│  ═══════════════════════════════════════════════════════════════════   │
+│                                                                         │
+│  1. Bidirectional LSTM:                                                │
+│     X (32, 24, 22) ──► LSTM ──► outputs (32, 24, 128)                  │
+│                              └─► hidden (4, 32, 64)                    │
+│                              └─► cell (4, 32, 64)                      │
+│                                                                         │
+│  2. Reshape & Project:                                                 │
+│     hidden (4, 32, 64) ──► (2, 32, 128) ──► fc ──► (2, 32, 64)        │
+│     cell   (4, 32, 64) ──► (2, 32, 128) ──► fc ──► (2, 32, 64)        │
+│                                                                         │
+│  ═══════════════════════════════════════════════════════════════════   │
+│  DECODER (5 iterations)                                                 │
+│  ═══════════════════════════════════════════════════════════════════   │
+│                                                                         │
+│  Initial: decoder_input = X[:, -1, 0] = (32, 1, 1)                     │
+│                                                                         │
+│  t=0: input(32,1,1) + hidden(2,32,64) ──► LSTM ──► hidden'(2,32,64)   │
+│       └─► FC ──► pred_0 (32, 1)                                        │
+│                                                                         │
+│  t=1: input(32,1,1) + hidden'(2,32,64) ──► LSTM ──► hidden''          │
+│       └─► FC ──► pred_1 (32, 1)                                        │
+│                                                                         │
+│  ... (repeat for t=2, 3, 4) ...                                        │
+│                                                                         │
+│  3. Concatenate:                                                        │
+│     [pred_0, pred_1, pred_2, pred_3, pred_4] ──► (32, 5)               │
+│                                                                         │
+│  ═══════════════════════════════════════════════════════════════════   │
+│  OUTPUT: (32, 5) = 32 samples × 5 predictions                          │
+│  ═══════════════════════════════════════════════════════════════════   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
-
-**Lợi ích:**
-- Encoder "nhìn" được cả quá khứ và tương lai trong input sequence
-- Capture patterns từ cả 2 chiều (VD: traffic tăng trước giờ cao điểm, giảm sau)
 
 ---
 
@@ -824,7 +1157,7 @@ $$RMSE = \sqrt{\frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2}$$
 
 ---
 
-#### 1.4.2 Đánh giá Per-Step (Multi-Step Forecasting)
+#### 1.5.2 Đánh giá Per-Step (Multi-Step Forecasting)
 
 ```python
 def calculate_metrics_per_step(y_true, y_pred):
@@ -851,7 +1184,7 @@ def calculate_metrics_per_step(y_true, y_pred):
     return results
 ```
 
-#### 1.4.3 Kết quả thực tế của Model
+#### 1.5.3 Kết quả thực tế của Model
 
 | Step | R² | NSE | MAE | RMSE |
 |------|-----|-----|-----|------|
@@ -867,7 +1200,7 @@ def calculate_metrics_per_step(y_true, y_pred):
 - Error tăng dần theo horizon (t+1 chính xác nhất, t+5 kém nhất) → Expected behavior
 - Model dự báo tốt cả 5 steps
 
-#### 1.4.4 Inverse Transform trước khi đánh giá
+#### 1.5.4 Inverse Transform trước khi đánh giá
 
 ```python
 # Predictions đang ở scaled space [0, 1]
