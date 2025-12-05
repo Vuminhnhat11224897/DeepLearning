@@ -1,0 +1,87 @@
+{
+    "selected_features": [
+        "hour_sin",
+        "hour_cos",
+        "day_sin",
+        "day_cos",
+        "month_sin",
+        "month_cos",
+        "hour",
+        "day_of_week",
+        "day_of_month",
+        "month",
+        "year",
+        "season",
+        "is_weekend",
+        "is_rush_hour",
+        "temp",
+        "clouds_all",
+        "rain_1h",
+        "snow_1h",
+        "is_rainy",
+        "is_snowy",
+        "rush_rain"
+    ],
+    "n_features": 21,
+    "target": "traffic_volume",
+    "categories": {
+        "cyclical": [
+            "hour_sin",
+            "hour_cos",
+            "day_sin",
+            "day_cos",
+            "month_sin",
+            "month_cos"
+        ],
+        "temporal": [
+            "hour",
+            "day_of_week",
+            "day_of_month",
+            "month",
+            "year",
+            "week_of_year",
+            "quarter",
+            "season"
+        ],
+        "context": [
+            "is_weekend",
+            "is_rush_hour"
+        ],
+        "weather": [
+            "temp",
+            "temp_celsius",
+            "clouds_all",
+            "rain_1h",
+            "snow_1h",
+            "is_rainy",
+            "is_snowy"
+        ],
+        "interaction": [
+            "rush_rain"
+        ]
+    },
+    "correlations": {
+        "hour_cos": 0.7667187941062983,
+        "is_rush_hour": 0.45295868196177336,
+        "hour": 0.3552366769860528,
+        "hour_sin": 0.254286660958812,
+        "is_weekend": 0.21249643132382126,
+        "day_sin": 0.16499690988740034,
+        "day_of_week": 0.1444602682509482,
+        "temp": 0.1368841543911801,
+        "day_cos": 0.1029986129969169,
+        "rush_rain": 0.09326660200723697,
+        "clouds_all": 0.07833953270158352,
+        "season": 0.048019127576060555,
+        "month_cos": 0.04437641465530731,
+        "year": 0.010580207358047962,
+        "month_sin": 0.00692395833105272,
+        "is_snowy": 0.0054371320110894305,
+        "rain_1h": 0.005401901568778555,
+        "month": 0.0045167662725491995,
+        "is_rainy": 0.004264980104353736,
+        "day_of_month": 0.004249804801703586,
+        "snow_1h": 0.0020858304345178747
+    },
+    "note": "Features selected for LSTM - no lag/rolling/diff to avoid data leakage"
+}

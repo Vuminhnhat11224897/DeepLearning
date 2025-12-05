@@ -56,6 +56,47 @@ def create_sequences(data: np.ndarray,
     print(f"Created sequences: X shape = {X.shape}, y shape = {y.shape}")
     return X, y
 
+
+def create_sequences_from_segments(segments: list,
+                                    target_idx: int,
+                                    input_seq_len: int = 24,
+                                    output_seq_len: int = 5) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Tạo sequences từ nhiều segment liên tục.
+    Dùng khi dữ liệu bị gián đoạn và đã được tách thành các segment.
+    
+    Args:
+        segments: List các numpy arrays, mỗi cái shape (n_timesteps, n_features)
+        target_idx: Index của cột target
+        input_seq_len: Số timesteps input
+        output_seq_len: Số timesteps output cần dự đoán
+    
+    Returns:
+        X: Input sequences, shape (n_samples, input_seq_len, n_features)
+        y: Target sequences, shape (n_samples, output_seq_len)
+    """
+    all_X, all_y = [], []
+    
+    for i, segment in enumerate(segments):
+        if len(segment) < input_seq_len + output_seq_len:
+            print(f"  Segment {i+1}: skipped (too short: {len(segment)} < {input_seq_len + output_seq_len})")
+            continue
+            
+        X_seg, y_seg = [], []
+        for j in range(len(segment) - input_seq_len - output_seq_len + 1):
+            X_seg.append(segment[j:j + input_seq_len])
+            y_seg.append(segment[j + input_seq_len:j + input_seq_len + output_seq_len, target_idx])
+        
+        all_X.extend(X_seg)
+        all_y.extend(y_seg)
+        print(f"  Segment {i+1}: created {len(X_seg)} sequences")
+    
+    X = np.array(all_X)
+    y = np.array(all_y)
+    
+    print(f"Total sequences from {len(segments)} segments: X shape = {X.shape}, y shape = {y.shape}")
+    return X, y
+
 def train_val_test_split(X: np.ndarray, 
                          y: np.ndarray,
                          train_ratio: float = 0.7,

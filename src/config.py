@@ -40,6 +40,7 @@ DATE_COLUMN = 'date_time'
 # ==================== SEQUENCE CONFIG ====================
 INPUT_SEQ_LEN = 24      # Use 24 hours of history
 OUTPUT_SEQ_LEN = 5      # Predict next 5 hours
+MIN_SEGMENT_LENGTH = 48 # Minimum rows for a valid segment (for Seq2Seq with gaps)
 
 # ==================== TRAIN/VAL/TEST SPLIT ====================
 TRAIN_RATIO = 0.70

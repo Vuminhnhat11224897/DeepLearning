@@ -1,12 +1,92 @@
 """
-Feature Selection Functions
+Feature Selection Functions for LSTM Encoder-Decoder
+
+Optimized for time series forecasting with LSTM:
+- No lag/rolling/diff features (LSTM learns from sequences)
+- Focus on temporal, weather, and context features
+- Avoid data leakage
 """
 import pandas as pd
 import numpy as np
-from typing import List, Tuple
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.feature_selection import mutual_info_regression, RFE
-from sklearn.preprocessing import StandardScaler
+from typing import List, Tuple, Dict
+
+
+# ============================================================
+# LSTM-SPECIFIC FEATURE CATEGORIES
+# ============================================================
+
+# Features that LSTM can use safely (no data leakage)
+LSTM_SAFE_FEATURES = {
+    # Cyclical temporal features (encode time patterns)
+    'cyclical': ['hour_sin', 'hour_cos', 'day_sin', 'day_cos', 'month_sin', 'month_cos'],
+    
+    # Categorical temporal features
+    'temporal': ['hour', 'day_of_week', 'day_of_month', 'month', 'year', 
+                 'week_of_year', 'quarter', 'season'],
+    
+    # Binary context features
+    'context': ['is_weekend', 'is_rush_hour'],
+    
+    # Weather features (known at prediction time or forecasted)
+    'weather': ['temp', 'temp_celsius', 'clouds_all', 'rain_1h', 'snow_1h', 
+                'is_rainy', 'is_snowy'],
+    
+    # Interaction features
+    'interaction': ['rush_rain'],
+}
+
+# Features to NEVER use with LSTM (cause data leakage)
+LEAKAGE_FEATURES = [
+    # Lag features - LSTM handles this via sequence input
+    'lag', '_lag_',
+    # Rolling statistics - uses future data in training
+    'rolling_', 'ewm_',
+    # Difference features - can leak information
+    'diff_', 'pct_change',
+]
+
+
+def get_lstm_feature_categories() -> Dict[str, List[str]]:
+    """Return feature categories safe for LSTM"""
+    return LSTM_SAFE_FEATURES.copy()
+
+
+def check_for_leakage_features(features: List[str]) -> List[str]:
+    """Check if any features might cause data leakage"""
+    leakage = []
+    for feat in features:
+        for pattern in LEAKAGE_FEATURES:
+            if pattern in feat.lower():
+                leakage.append(feat)
+                break
+    return leakage
+
+
+def get_available_features(df: pd.DataFrame, 
+                           target_col: str = 'traffic_volume',
+                           date_col: str = 'date_time') -> Dict[str, List[str]]:
+    """
+    Get available features from dataframe, categorized by type.
+    Only returns features that exist in the dataframe.
+    """
+    available = {}
+    
+    for category, feature_list in LSTM_SAFE_FEATURES.items():
+        available[category] = [f for f in feature_list if f in df.columns]
+    
+    # Check for any leakage features that shouldn't be there
+    all_cols = df.columns.tolist()
+    exclude = [target_col, date_col]
+    numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    numerical_cols = [c for c in numerical_cols if c not in exclude]
+    
+    leakage = check_for_leakage_features(numerical_cols)
+    if leakage:
+        print(f"⚠️ Warning: Found {len(leakage)} potential leakage features: {leakage}")
+        print("  These should NOT be used with LSTM!")
+    
+    return available
+
 
 def correlation_with_target(df: pd.DataFrame, 
                             target_col: str = 'traffic_volume',
@@ -17,7 +97,10 @@ def correlation_with_target(df: pd.DataFrame,
     if target_col in numerical_cols:
         numerical_cols.remove(target_col)
     
-    correlations = df[numerical_cols].corrwith(df[target_col]).abs().sort_values(ascending=False)
+    # Filter out leakage features
+    safe_cols = [c for c in numerical_cols if not check_for_leakage_features([c])]
+    
+    correlations = df[safe_cols].corrwith(df[target_col]).abs().sort_values(ascending=False)
     
     # Filter by threshold
     selected = correlations[correlations >= threshold].index.tolist()
@@ -25,10 +108,14 @@ def correlation_with_target(df: pd.DataFrame,
     print(f"Features with |correlation| >= {threshold}: {len(selected)}")
     return correlations, selected
 
+
 def remove_highly_correlated(df: pd.DataFrame,
                              features: List[str],
                              threshold: float = 0.95) -> List[str]:
     """Remove features that are highly correlated with each other"""
+    if len(features) <= 1:
+        return features
+        
     corr_matrix = df[features].corr().abs()
     
     # Upper triangle
@@ -39,136 +126,97 @@ def remove_highly_correlated(df: pd.DataFrame,
     
     selected = [f for f in features if f not in to_drop]
     
-    print(f"Removed {len(to_drop)} highly correlated features (>{threshold})")
-    print(f"Dropped: {to_drop}")
+    if to_drop:
+        print(f"Removed {len(to_drop)} highly correlated features (>{threshold})")
+        print(f"Dropped: {to_drop}")
+    else:
+        print("No highly correlated features to remove")
+    
     return selected
 
-def random_forest_importance(df: pd.DataFrame,
-                             features: List[str],
+
+def select_features_for_lstm(df: pd.DataFrame,
                              target_col: str = 'traffic_volume',
-                             n_estimators: int = 100,
-                             top_k: int = None) -> Tuple[pd.Series, List[str]]:
-    """Calculate feature importance using Random Forest"""
-    X = df[features].values
-    y = df[target_col].values
+                             date_col: str = 'date_time',
+                             include_categories: List[str] = None,
+                             multicollinearity_threshold: float = 0.95) -> Tuple[List[str], Dict]:
+    """
+    Select features optimized for LSTM Encoder-Decoder.
     
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    Args:
+        df: Input DataFrame
+        target_col: Target column name
+        date_col: Date column name  
+        include_categories: Which feature categories to include
+                           Options: 'cyclical', 'temporal', 'context', 'weather', 'interaction'
+                           Default: all categories
+        multicollinearity_threshold: Threshold for removing correlated features
+        
+    Returns:
+        Tuple of (selected_features, info_dict)
+    """
+    print("=" * 60)
+    print("LSTM Feature Selection")
+    print("=" * 60)
     
-    # Train Random Forest
-    rf = RandomForestRegressor(n_estimators=n_estimators, random_state=42, n_jobs=-1)
-    rf.fit(X_scaled, y)
+    # Default: include all categories
+    if include_categories is None:
+        include_categories = list(LSTM_SAFE_FEATURES.keys())
     
-    # Get importance
-    importance = pd.Series(rf.feature_importances_, index=features).sort_values(ascending=False)
+    # Get available features by category
+    available = get_available_features(df, target_col, date_col)
     
-    if top_k:
-        selected = importance.head(top_k).index.tolist()
-    else:
-        selected = features
+    # Collect features from selected categories
+    selected_features = []
+    category_info = {}
     
-    print(f"Random Forest feature importance calculated")
-    return importance, selected
+    for category in include_categories:
+        if category in available:
+            feats = available[category]
+            selected_features.extend(feats)
+            category_info[category] = feats
+            print(f"  {category}: {len(feats)} features - {feats}")
+    
+    print(f"\nTotal features before filtering: {len(selected_features)}")
+    
+    # Remove multicollinearity
+    if len(selected_features) > 1:
+        selected_features = remove_highly_correlated(
+            df, selected_features, multicollinearity_threshold
+        )
+    
+    # Calculate correlation with target for info
+    correlations = df[selected_features].corrwith(df[target_col]).abs().sort_values(ascending=False)
+    
+    info = {
+        'categories': category_info,
+        'correlations': correlations,
+        'n_features': len(selected_features),
+    }
+    
+    print("=" * 60)
+    print(f"Selected {len(selected_features)} features for LSTM")
+    print("=" * 60)
+    
+    return selected_features, info
 
-def mutual_information_scores(df: pd.DataFrame,
-                              features: List[str],
-                              target_col: str = 'traffic_volume',
-                              top_k: int = None) -> Tuple[pd.Series, List[str]]:
-    """Calculate mutual information scores"""
-    X = df[features].values
-    y = df[target_col].values
-    
-    # Calculate MI
-    mi_scores = mutual_info_regression(X, y, random_state=42)
-    mi_series = pd.Series(mi_scores, index=features).sort_values(ascending=False)
-    
-    if top_k:
-        selected = mi_series.head(top_k).index.tolist()
-    else:
-        selected = features
-    
-    print(f"Mutual Information scores calculated")
-    return mi_series, selected
-
-def recursive_feature_elimination(df: pd.DataFrame,
-                                  features: List[str],
-                                  target_col: str = 'traffic_volume',
-                                  n_features: int = 20) -> List[str]:
-    """Select features using Recursive Feature Elimination"""
-    X = df[features].values
-    y = df[target_col].values
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # RFE with Random Forest
-    estimator = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
-    rfe = RFE(estimator, n_features_to_select=n_features, step=1)
-    rfe.fit(X_scaled, y)
-    
-    # Get selected features
-    selected = [features[i] for i in range(len(features)) if rfe.support_[i]]
-    
-    print(f"RFE selected {len(selected)} features")
-    return selected
 
 def feature_selection_pipeline(df: pd.DataFrame,
                                target_col: str = 'traffic_volume',
                                date_col: str = 'date_time',
-                               exclude_cols: List[str] = None,
-                               correlation_threshold: float = 0.05,
-                               multicollinearity_threshold: float = 0.95,
-                               top_k: int = 30) -> Tuple[List[str], dict]:
-    """Complete feature selection pipeline"""
-    print("=" * 50)
-    print("Starting Feature Selection Pipeline")
-    print("=" * 50)
+                               multicollinearity_threshold: float = 0.95) -> Tuple[List[str], Dict]:
+    """
+    Complete feature selection pipeline for LSTM.
     
-    # Get all numerical features
-    numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # Exclude certain columns
-    if exclude_cols is None:
-        exclude_cols = [target_col]
-    else:
-        exclude_cols = exclude_cols + [target_col]
-    
-    features = [c for c in numerical_cols if c not in exclude_cols]
-    print(f"Initial features: {len(features)}")
-    
-    results = {}
-    
-    # 1. Correlation with target
-    corr_scores, corr_selected = correlation_with_target(df, target_col, correlation_threshold)
-    results['correlation'] = corr_scores
-    features = [f for f in features if f in corr_selected]
-    print(f"After correlation filter: {len(features)}")
-    
-    # 2. Remove multicollinearity
-    features = remove_highly_correlated(df, features, multicollinearity_threshold)
-    print(f"After multicollinearity removal: {len(features)}")
-    
-    # 3. Random Forest importance
-    rf_importance, _ = random_forest_importance(df, features, target_col)
-    results['rf_importance'] = rf_importance
-    
-    # 4. Mutual Information
-    mi_scores, _ = mutual_information_scores(df, features, target_col)
-    results['mi_scores'] = mi_scores
-    
-    # 5. Final selection based on combined ranking
-    # Average rank from RF and MI
-    rf_ranks = rf_importance[features].rank(ascending=False)
-    mi_ranks = mi_scores[features].rank(ascending=False)
-    avg_ranks = (rf_ranks + mi_ranks) / 2
-    
-    final_features = avg_ranks.sort_values().head(top_k).index.tolist()
-    results['final_ranking'] = avg_ranks.sort_values()
-    
-    print("=" * 50)
-    print(f"Selected {len(final_features)} features")
-    print("=" * 50)
-    
-    return final_features, results
+    This is a simplified pipeline that:
+    1. Uses only LSTM-safe features (no leakage)
+    2. Removes highly correlated features
+    3. Returns features grouped by category
+    """
+    return select_features_for_lstm(
+        df=df,
+        target_col=target_col,
+        date_col=date_col,
+        include_categories=None,  # Include all safe categories
+        multicollinearity_threshold=multicollinearity_threshold
+    )
